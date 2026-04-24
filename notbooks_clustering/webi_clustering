@@ -1,0 +1,658 @@
+import pandas as pd 
+import os
+import re
+import pyspark
+import datetime
+import logging
+import json
+import requests
+import urllib3
+import time
+from datetime import datetime
+from pathlib import Path
+from pyspark.sql import SparkSession
+import configparser
+from pyspark.sql.types import StructType, StructField, StringType, IntegerType, BooleanType, ArrayType
+from pyspark.sql import functions as F
+from pyspark.sql.window import Window
+from pyspark.ml import Pipeline
+from pyspark.ml.feature import RegexTokenizer, NGram, CountVectorizer, IDF
+from pyspark.ml.linalg import SparseVector, DenseVector
+from pyspark.sql.types import DoubleType
+
+def main(
+    catalog="dataplatform01_central_dev_catalog_01",
+    bronze_schema="bronze_sap_bo_snp",
+    silver_schema="silver_sap_bo",
+    source_table_name="webi_metadata_cms_silver",
+    sim_table_name="webi_metadata_cms_similarity",
+    silver_table_name="webi_metadata_cms_silver_1",
+    sim_threshold=0.60,
+    vocab_size=50000,
+    min_df=3,
+    keep_n_recent_per_group=None,  # e.g., 50 to cap very large groups; None = keep all
+    zorder=True,
+    include_fields=("Document_Id", "Combined_all"),
+    weight_sql=1  # set >1 to give SQL_Query more weight by repeating it in text
+):
+    """
+    TF-IDF + cosine similarity per Document_Id group:
+    - Canonical row (latest by ingestion_ts)
+    - Similarity of each other row to canonical
+    - Deduped Silver: canonical + non-duplicates (similarity < threshold)
+    """
+
+    from pyspark.sql import functions as F
+    from pyspark.sql.window import Window
+    from pyspark.ml import Pipeline
+    from pyspark.ml.feature import RegexTokenizer, NGram, CountVectorizer, IDF
+    from pyspark.sql.types import DoubleType
+    from pyspark.ml.linalg import SparseVector, DenseVector
+
+    # -------------------------------------------------------------------------
+    # 0) Setup
+    # -------------------------------------------------------------------------
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+ 
+    CATALOG = catalog
+    # BRONZE_SCHEMA = bronze_schema
+    SILVER_SCHEMA = silver_schema
+    BRONZE_TABLE = f"{CATALOG}.{SILVER_SCHEMA}.{source_table_name}"
+    SIM_TABLE   = f"{CATALOG}.{SILVER_SCHEMA}.{sim_table_name}"
+    SILVER_TABLE= f"{CATALOG}.{SILVER_SCHEMA}.{silver_table_name}"
+    Todyay_Date = datetime.now().strftime("%Y-%m-%d")
+
+    spark = SparkSession.builder \
+        .appName("Clustering SQL") \
+        .getOrCreate()
+    Todyay_Date = datetime.now()
+    local_directory=os.getcwd()
+    logs_path=os.path.join(local_directory,f"{local_directory}/logs")
+    Path(logs_path).mkdir(parents=True, exist_ok=True)
+    logs_path=os.path.join(logs_path, f"clustering_script_{Todyay_Date}.log")
+
+    logger = logging.getLogger("clustering_notebook_logger ")
+    logger.setLevel(logging.INFO)
+
+    if logger.handlers:
+        for h in list(logger.handlers):
+            logger.removeHandler(h)
+
+    fh = logging.FileHandler(logs_path, mode="a", encoding="utf-8")
+    
+    fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+    fh.setFormatter(fmt)
+    logger.addHandler(fh)
+
+    logger.info("Clustering Notebook started.")
+
+    spark.sql(f"USE CATALOG {CATALOG}")
+    spark.sql(f"USE SCHEMA {SILVER_SCHEMA}")
+
+    # -------------------------------------------------------------------------
+    # 1) Load Bronze
+    # -------------------------------------------------------------------------
+    vname = main_concat(
+        schema="silver_sap_bo",
+        table="webi_metadata_cms_silver",
+        row_delim="\n-----\n",
+        field_delim=" || "
+    )
+# spark.sql(f"SELECT count(*) FROM {vname}")
+    df_bronze=spark.sql(f"SELECT * FROM {vname} ORDER BY Document_Id")
+
+    # df_bronze = spark.table({vname}).select(
+    #     "Document_Id", "Document_CUID", "Document_name", "Folder_Id", "Full_path",
+    #     "created", "lastAuthor", "scheduled", "updated", "API_Pause_Counts",
+    #     "End_Time", "Execution_Time_in_seconds", "Extraction_Stats",
+    #     "Number_of_API_Calls", "Number_of_Data_Providers", "Start_Time",
+    #     "Data_Provider_ID", "Data_Provider_Name", "DataSource_ID", "DataSource_CUID",
+    #     "Data_Profider_Refresh_Time", "DataSource_Type", "DataSource_Name",
+    #     "SQL_Index", "SQL_Query", "Connection_ID", "Connection_Name", "Connection_Type",
+    #     "Connection_DataBas", "Connection_Network", "ingestion_ts"
+    # ).where(F.col("Document_Id").isNotNull())
+    logger.info(f"Loaded {df_bronze.count()} rows from {vname}")
+
+    # # Optionally cap very large groups (keep last N rows per Document_Id)
+    # if keep_n_recent_per_group is not None:
+    #     w_recent = Window.partitionBy("Document_Id").orderBy(F.col("ingestion_ts").desc_nulls_last())
+    #     df_bronze = (
+    #         df_bronze
+    #         .withColumn("rnk_recent", F.row_number().over(w_recent))
+    #         .where(F.col("rnk_recent") <= keep_n_recent_per_group)
+    #         .drop("rnk_recent")
+    #     )
+
+    # -------------------------------------------------------------------------
+    # 2) Build text signal
+    # -------------------------------------------------------------------------
+    # Lowercase & concatenate selected fields; optionally repeat SQL_Query to weight it more
+    cols = [c for c in include_fields if c in df_bronze.columns]
+    if "SQL_Query" in cols and weight_sql > 1:
+        cols.extend(["SQL_Query"] * (weight_sql - 1))  # repeat for weighting
+    # logger.info(cols)
+    df_text = df_bronze.fillna("")
+    for c in cols:
+        df_text = df_text.withColumn(c, F.lower(F.col(c)))
+    df_text = df_text.withColumn("txt", F.concat_ws(" ", *[F.col(c) for c in cols]))
+    # logger.info(df_text.dtypes)
+    tokenizer = RegexTokenizer(
+        inputCol="txt", outputCol="tokens",
+        pattern=r"[^\w]+",  # split on non-word; keeps underscore
+        minTokenLength=2, toLowercase=True
+    )
+    
+
+    bigrams = NGram(n=2, inputCol="tokens", outputCol="bigrams")
+
+    df_tokens = tokenizer.transform(df_text)
+    df_tokens = bigrams.transform(df_tokens).withColumn(
+        "tok_all", F.concat(F.col("tokens"), F.col("bigrams"))
+    )
+
+    # TF -> IDF
+    cv = CountVectorizer(inputCol="tok_all", outputCol="tf", vocabSize=vocab_size, minDF=min_df)
+    idf = IDF(inputCol="tf", outputCol="tfidf")
+    pipeline = Pipeline(stages=[cv, idf])
+
+    model = pipeline.fit(df_tokens)
+    df_feat = model.transform(df_tokens)
+
+    # Keep core columns and the tfidf vector
+    df_feat = df_feat.select(
+        "Document_Id", "tfidf",
+        *[c for c in df_bronze.columns if c not in {"Document_Id","Combined_all"}]
+    )
+
+    # # -------------------------------------------------------------------------
+    # # 3) Canonical row per Document_Id (latest by ingestion_ts)
+    # # -------------------------------------------------------------------------
+    # w = Window.partitionBy("Document_Id").orderBy(F.col("ingestion_ts").desc_nulls_last())
+    # df_ranked = df_feat.withColumn("rn", F.row_number().over(w))
+
+    # df_canon = df_ranked.where("rn = 1") \
+    #     .select(
+    #         "Document_Id",
+    #         F.col("Document_CUID").alias("canonical_id"),
+    #         F.col("tfidf").alias("tfidf_canon"),
+    #         *[c for c in df_bronze.columns]  # original columns for writing back
+    #     )
+
+    # df_others = df_ranked.where("rn > 1") \
+    #     .select(
+    #         "Document_Id",
+    #         F.col("Document_CUID").alias("other_id"),
+    #         "tfidf",
+    #         *[c for c in df_bronze.columns]
+    #     )
+
+    # # -------------------------------------------------------------------------
+    # # 4) Cosine similarity (others vs canonical)
+    # # -------------------------------------------------------------------------
+    # try:
+    #     import numpy as np
+    # except Exception:
+    #     np = None
+
+    # def cosine_sim(v1, v2):
+    #     if v1 is None or v2 is None or np is None:
+    #         return None
+    #     a = v1.toArray() if isinstance(v1, (SparseVector, DenseVector)) else np.array(v1)
+    #     b = v2.toArray() if isinstance(v2, (SparseVector, DenseVector)) else np.array(v2)
+    #     na = np.linalg.norm(a)
+    #     nb = np.linalg.norm(b)
+    #     if na == 0 or nb == 0:
+    #         return None
+    #     return float(np.dot(a, b) / (na * nb))
+
+    # cos_udf = F.udf(cosine_sim, DoubleType())
+
+    # df_join = df_others.join(
+    #     df_canon.select("Document_Id", "canonical_id", "tfidf_canon"),
+    #     on="Document_Id",
+    #     how="inner"
+    # )
+
+    # df_sim = (
+    #     df_join
+    #     .withColumn("similarity", cos_udf(F.col("tfidf"), F.col("tfidf_canon")))
+    #     .withColumn(
+    #         "similarity_flag",
+    #         F.when(F.col("similarity") >= F.lit(sim_threshold), F.lit("LIKELY_DUPLICATE"))
+    #          .when(F.col("similarity").isNull(), F.lit("UNKNOWN"))
+    #          .otherwise(F.lit("DIFFERENT"))
+    #     )
+    #     .select("Document_Id", "other_id", "canonical_id", "similarity", "similarity_flag", "ingestion_ts")
+    # )
+
+    # # -------------------------------------------------------------------------
+    # # 5) Persist similarity table (Silver)
+    # # -------------------------------------------------------------------------
+    # spark.sql(f"USE SCHEMA {SILVER_SCHEMA}")
+    # df_sim.write.mode("overwrite").format("delta").saveAsTable(SIM_TABLE)
+
+    # # -------------------------------------------------------------------------
+    # # 6) Build deduped Silver:
+    # #    - keep canonical rows (rn = 1)
+    # #    - keep non-duplicates (others with similarity < threshold)
+    # # -------------------------------------------------------------------------
+    # canon_rows = df_canon.select(*df_bronze.columns)
+
+    # non_dup_ids = df_sim.where(F.col("similarity_flag") == "DIFFERENT") \
+    #                     .select("Document_Id", F.col("other_id").alias("Document_CUID"))
+
+    # others_rows = df_bronze.join(non_dup_ids, on=["Document_Id", "Document_CUID"], how="inner")
+
+    # silver_df = canon_rows.unionByName(others_rows)
+
+    # silver_df.write.mode("overwrite").format("delta").saveAsTable(SILVER_TABLE)
+
+    # if zorder:
+    #     spark.sql(f"OPTIMIZE {SILVER_TABLE} ZORDER BY (Document_Id)")
+
+    # # -------------------------------------------------------------------------
+    # # 7) Summary (optional)
+    # # -------------------------------------------------------------------------
+    cnt_sim = spark.table(SIM_TABLE).count()
+    cnt_silver = spark.table(SILVER_TABLE).count()
+    # logger.info(f"[TF-IDF] similarity rows: {cnt_sim:,}")
+    # logger.info(f"[Silver] deduped rows:   {cnt_silver:,}")
+
+    return {
+        "similarity_table": SIM_TABLE,
+        "silver_table": SILVER_TABLE,
+        "similarity_rows": cnt_sim,
+        "silver_rows": cnt_silver,
+        "threshold": sim_threshold,
+    }
+
+def main_concat(
+    catalog="dataplatform01_central_dev_catalog_01",
+    schema="silver_sap_bo",   # or bronze_sap_bo_snp if reading directly from Bronze
+    table="webi_metadata_cms_silver",  # use your source table name here
+    output_view="v_docid_concat",
+    row_delim="\n",            # delimiter between rows in the same Document_Id
+    field_delim=" | " ,         # delimiter between fields inside a row
+    logger=None
+):
+    """
+    Build concatenation per Document_Id, ordered by SQL_Index (numeric).
+    Produces a view with four columns of concatenations:
+    - SQL_Query_all
+    - DataSource_Name_all
+    - Connection_Name_all
+    - Combined_all (includes SQL_Index label + all fields)
+
+    Returns: name of the created temp view.
+    """
+    from pyspark.sql import functions as F
+
+    spark.sql(f"USE CATALOG {catalog}")
+    spark.sql(f"USE SCHEMA {schema}")
+
+    df = spark.table(f"{catalog}.{schema}.{table}").select(
+        "Document_Id", "SQL_Index", "SQL_Query", "DataSource_Name", "Connection_Name"
+    ).where(F.col("Document_Id").isNotNull())
+    logger.info(f"Found {df.count()} rows in {table}")
+
+    # Cast SQL_Index to int for proper ordering; null-safe sort keeps nulls last
+    df2 = (
+        df
+        .withColumn("idx", F.col("SQL_Index").cast("int"))  # numeric order
+        .withColumn("SQL_Query", F.coalesce(F.col("SQL_Query"), F.lit("")))
+        .withColumn("DataSource_Name", F.coalesce(F.col("DataSource_Name"), F.lit("")))
+        .withColumn("Connection_Name", F.coalesce(F.col("Connection_Name"), F.lit("")))
+    )
+
+    # Collect rows into an array of structs and sort by idx
+    grouped = (
+        df2.groupBy("Document_Id")
+           .agg(F.array_sort(F.collect_list(F.struct(
+                F.col("idx").alias("idx"),
+                F.col("SQL_Query").alias("q"),
+                F.col("DataSource_Name").alias("ds"),
+                F.col("Connection_Name").alias("cn")
+            ))).alias("rows"))
+    )
+    logger.info(f"Found {grouped.count()} groups")
+    # Build per-field concatenations (ordered)
+    result = (
+        grouped.select(
+            "Document_Id",
+            F.expr(f"array_join(transform(rows, x -> x.q), '{row_delim}')").alias("SQL_Query_all"),
+            F.expr(f"array_join(transform(rows, x -> x.ds), '{row_delim}')").alias("DataSource_Name_all"),
+            F.expr(f"array_join(transform(rows, x -> x.cn), '{row_delim}')").alias("Connection_Name_all"),
+            F.expr(
+                "array_join("
+                f"transform(rows, x -> concat('SQL_Index: ', coalesce(string(x.idx), ''), '{field_delim}', "
+                "                       'SQL_Query: ', x.q, '{field_delim}', "
+                "                       'DataSource_Name: ', x.ds, '{field_delim}', "
+                "                       'Connection_Name: ', x.cn)"
+                "), "
+                f"'{row_delim}')"
+            ).alias("Combined_all")
+        )
+    )
+    logger.info(f"Created {result.count()} rows with {result.schema}"    )
+
+    # Create a temp view for easy SQL access
+    result.createOrReplaceTempView(output_view)
+    logger.info(f"Created temp view: {output_view}")
+    return output_view
+
+# def main_global_doc_similarity(
+#     catalog="dataplatform01_central_dev_catalog_01",
+#     schema="silver_sap_bo",               # where the temp view lives
+#     concat_view="v_docid_concat",         # temp view created by main_concat
+#     out_schema="silver_sap_bo",           # output schema
+#     out_table="webi_metadata_cms_doc_global_similarity",
+#     num_neighbors=10,                     # top-K per document
+#     vocab_size=50000,
+#     min_df=2,
+#     bucket_length=2.0,                    # LSH bucket length (tune)
+#     num_hash_tables=6,                    # LSH tables (tune for recall/speed)
+#     filter_empty=True,                    # drop empty Combined_all
+#     cosine_threshold=None                 # e.g., 0.85 to keep only strong matches
+# ):
+#     """
+#     Compute global nearest neighbors between documents (one row per Document_Id), based on 'Combined_all' text.
+#     Writes {catalog}.{out_schema}.{out_table} with:
+#       - src_document_id, nbr_document_id, cosine_similarity, distance
+#     """
+#     from pyspark.sql import functions as F
+#     from pyspark.sql.window import Window
+#     from pyspark.ml.feature import RegexTokenizer, CountVectorizer, IDF, Normalizer, BucketedRandomProjectionLSH
+#     from pyspark.ml import Pipeline
+#     spark = SparkSession.builder \
+#         .appName("Clustering SQL") \
+#         .getOrCreate()
+#     Todyay_Date = datetime.now()
+#     local_directory=os.getcwd()
+#     logs_path=os.path.join(local_directory,f"{local_directory}/logs")
+#     Path(logs_path).mkdir(parents=True, exist_ok=True)
+#     logs_path=os.path.join(logs_path, f"clustering_script_{Todyay_Date}.log")
+
+#     logger = logging.getLogger("clustering_notebook_logger ")
+#     logger.setLevel(logging.INFO)
+
+#     if logger.handlers:
+#         for h in list(logger.handlers):
+#             logger.removeHandler(h)
+
+#     fh = logging.FileHandler(logs_path, mode="a", encoding="utf-8")
+    
+#     fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+#     fh.setFormatter(fmt)
+#     logger.addHandler(fh)
+
+#     logger.info("Clustering Notebook started.")
+
+#     spark.sql(f"USE CATALOG {catalog}")
+#     spark.sql(f"USE SCHEMA {schema}")
+#     spark.sql(f"CREATE SCHEMA IF NOT EXISTS {catalog}.{out_schema}")
+
+#     # 1) Load aggregated documents from the temp view
+#     df_docs = spark.table(concat_view).select("Document_Id", "Combined_all")
+#     if filter_empty:
+#         df_docs = df_docs.where(F.length(F.col("Combined_all")) > 0)
+
+#     # Add unique row id
+#     df_docs = df_docs.withColumn("id_row", F.monotonically_increasing_id())
+#     logger.info(df_docs.dtypes)
+#     logger.info(df_docs.printSchema())
+
+#     # 2) Tokenize + TF-IDF + Normalize (unit vectors)
+#     # Keep underscores in tokens (identifiers), split on non-word
+#     tokenizer = RegexTokenizer(
+#         inputCol="Combined_all", outputCol="tokens",
+#         pattern=r"[^\w]+", toLowercase=True, minTokenLength=2
+#     )
+#     cv = CountVectorizer(inputCol="tokens", outputCol="tf", vocabSize=vocab_size, minDF=min_df)
+#     idf = IDF(inputCol="tf", outputCol="tfidf")
+#     normalizer = Normalizer(inputCol="tfidf", outputCol="vec_norm", p=2.0)
+
+#     pipe = Pipeline(stages=[tokenizer, cv, idf, normalizer])
+#     model = pipe.fit(df_docs)
+#     df_vec = model.transform(df_docs).select("id_row", "Document_Id", "vec_norm").cache()
+
+#     # 3) LSH ANN on normalized vectors (Euclidean -> cosine)
+#     lsh = BucketedRandomProjectionLSH(
+#         inputCol="vec_norm", outputCol="hashes",
+#         bucketLength=bucket_length, numHashTables=num_hash_tables
+#     )
+#     lsh_model = lsh.fit(df_vec)
+
+#     # Similarity join over the whole set; filter self-pairs and rank top-K by cosine
+#     sim_join = lsh_model.approxSimilarityJoin(
+#         df_vec, df_vec,
+#         threshold=float("inf"),  # we rank later
+#         distCol="distance"
+#     )
+#     # .where(F.col("a.id_row") != F.col("b.id_row"))
+
+#     sim_pairs = sim_join.withColumn(
+#         "cosine_similarity",
+#         1.0 - (F.col("distance") * F.col("distance")) / 2.0
+#     )
+    
+#     flat = sim_pairs.select(
+#         F.col("datasetA.Document_Id").alias("src_document_id"),
+#         F.col("datasetB.Document_Id").alias("nbr_document_id"),
+#         F.col("datasetA.id_row").alias("src_row_id"),
+#         F.col("datasetB.id_row").alias("nbr_row_id"),
+#         F.col    F.col("distance"),
+#         F.col("cosine_similarity")
+#     )
+
+
+#     if cosine_threshold is not None:
+#         sim_pairs = sim_pairs.where(F.col("cosine_similarity") >= F.lit(float(cosine_threshold)))
+
+#     w = Window.partitionBy("src_document_id").orderBy(F.col("cosine_similarity").desc_nulls_last())
+#     topk = flat.withColumn("rk", F.row_number().over(w)) \
+
+#     sim_pairs = sim_join.where(F.col("datasetA.id_row") != F.col("datasetB.id_row"))
+
+#     # w = Window.partitionBy("a.Document_Id").orderBy(F.col("cosine_similarity").desc_nulls_last())
+#     # topk = (sim_pairs
+#     #         .withColumn("rk", F.row_number().over(w))
+#     #         .where(F.col("rk") <= F.lit(num_neighbors))
+#     #         .select(
+#     #             F.col("a.Document_Id").alias("src_document_id"),
+#     #             F.col("b.Document_Id").alias("nbr_document_id"),
+#     #             "distance",
+#     #             "cosine_similarity"
+#     #         ))
+
+#     # 4) Persist results as a Delta table
+#     spark.sql(f"USE SCHEMA {out_schema}")
+#     topk.write.mode("overwrite").format("delta").saveAsTable(f"{catalog}.{out_schema}.{out_table}")
+
+#     # Optional optimize
+#     try:
+#         spark.sql(f"OPTIMIZE {catalog}.{out_schema}.{out_table} ZORDER BY (src_document_id)")
+#     except Exception as e:
+#         print(f"OPTIMIZE skipped: {e}")
+
+#     cnt = spark.table(f"{catalog}.{out_schema}.{out_table}").count()
+#     print(f"Global document similarity pairs written: {cnt:,}")
+#     return {
+#         "similarity_table": f"{catalog} similarity_table: {catalog}.{out_schema}.{out_table}",
+#         "pairs": cnt,
+#         "num_neighbors": num_neighbors,
+#         "vocab_size": vocab_size,
+#         "min_df": min_df,
+#         "bucket_length": bucket_length,
+#         "num_hash_tables": num_hash_tables,
+#         "cosine_threshold": cosine_threshold
+#         }
+
+def main_global_doc_similarity(
+    catalog="dataplatform01_central_dev_catalog_01",
+    schema="silver_sap_bo",               # where the temp view lives
+    concat_view="v_docid_concat",         # temp view created by main_concat
+    out_schema="silver_sap_bo",           # output schema
+    out_table="webi_metadata_cms_doc_global_similarity",
+    num_neighbors=10,                     # top-K per document
+    vocab_size=50000,
+    min_df=2,
+    bucket_length=2.0,                    # LSH bucket length (tune)
+    num_hash_tables=6,                    # LSH tables (tune for recall/speed)
+    filter_empty=True,                    # drop empty Combined_all
+    cosine_threshold=None,                 # e.g., 0.85 to keep only strong matches
+    logger=None
+):
+    """
+    Compute global nearest neighbors between documents (one row per Document_Id), based on 'Combined_all' text.
+    Writes {catalog}.{out_schema}.{out_table} with:
+      - src_document_id, nbr_document_id, cosine_similarity, distance
+    """
+    from pyspark.sql import functions as F
+    from pyspark.sql.window import Window
+    from pyspark.ml.feature import RegexTokenizer, CountVectorizer, IDF, Normalizer, BucketedRandomProjectionLSH
+    from pyspark.ml import Pipeline
+
+    # 0) Setup
+
+    spark.sql(f"USE CATALOG {catalog}")
+    spark.sql(f"USE SCHEMA {schema}")
+    spark.sql(f"CREATE SCHEMA IF NOT EXISTS {catalog}.{out_schema}")
+    logger.info("Starts Clustering Docs")
+    # 1) Load aggregated documents from the temp view
+    df_docs = spark.table(concat_view).select("Document_Id", "Combined_all")
+    if filter_empty:
+        df_docs = df_docs.where(F.length(F.col("Combined_all")) > 0)
+
+    # Unique row id for self-join filtering
+    df_docs = df_docs.withColumn("id_row", F.monotonically_increasing_id())
+    logger.info(f"Input structure for documents: {df_docs.dtypes}")
+    # 2) Tokenize + TF-IDF + Normalize (unit vectors)
+    tokenizer = RegexTokenizer(
+        inputCol="Combined_all", outputCol="tokens",
+        pattern=r"[^\w]+", toLowercase=True, minTokenLength=2
+    )
+    cv = CountVectorizer(inputCol="tokens", outputCol="tf", vocabSize=vocab_size, minDF=min_df)
+    idf = IDF(inputCol="tf", outputCol="tfidf")
+    normalizer = Normalizer(inputCol="tfidf", outputCol="vec_norm", p=2.0)
+    logger.info(f"Completed prepare TF-IDF")
+
+    pipe = Pipeline(stages=[tokenizer, cv, idf, normalizer])
+    model = pipe.fit(df_docs)
+    df_vec = model.transform(df_docs).select("id_row", "Document_Id", "vec_norm").cache()
+    logger.info(f"Vector ready for cosumption")
+
+    # 3) LSH ANN on normalized vectors (Euclidean -> cosine)
+    lsh = BucketedRandomProjectionLSH(
+        inputCol="vec_norm", outputCol="hashes",
+        bucketLength=bucket_length, numHashTables=num_hash_tables
+    )
+    logger.info("prepared LSH Model to fit vectors")
+    lsh_model = lsh.fit(df_vec)
+    logger.info("Get ready to start Similarity join")
+
+    sim_join = lsh_model.approxSimilarityJoin(
+        df_vec, df_vec,
+        threshold=float("inf"),
+        distCol="distance"
+    )
+    logger.info("start to remove self-pairs")
+    # Remove self-pairs
+    sim_pairs = sim_join.where(F.col("datasetA.id_row") != F.col("datasetB.id_row"))
+    logger.info("Prepare to convert L2 distance to cosine similarity")
+
+    # Convert L2 distance on unit vectors to cosine similarity
+    sim_pairs = sim_pairs.withColumn(
+        "cosine_similarity",
+        1.0 - (F.col("distance") * F.col("distance")) / 2.0
+    )
+    logger.info("Similarity join completed")
+    # Flatten fields
+    flat = sim_pairs.select(
+        F.col("datasetA.Document_Id").alias("src_document_id"),
+        F.col("datasetB.Document_Id").alias("nbr_document_id"),
+        F.col("datasetA.id_row").alias("src_row_id"),
+        F.col("datasetB.id_row").alias("nbr_row_id"),
+        F.col("distance"),
+        F.col("cosine_similarity")
+    )
+    logger.info("Flattened fields")
+
+    # Optional threshold
+    if cosine_threshold is not None:
+        flat = flat.where(F.col("cosine_similarity") >= F.lit(float(cosine_threshold)))
+    logger.info("Threshold applied, start to rank Top-K")
+    # Rank top-K neighbors per source document
+    w = Window.partitionBy("src_document_id").orderBy(F.col("cosine_similarity").desc_nulls_last())
+    logger.info("Windows defined")
+    topk = flat.withColumn("rk", F.row_number().over(w)) \
+               .where(F.col("rk") <= F.lit(num_neighbors)) \
+               .select("src_document_id", "nbr_document_id", "distance", "cosine_similarity")
+    logger.info(f"Top-K neighbors {num_neighbors}")
+    # 4) Persist results as a Delta table
+    spark.sql(f"USE SCHEMA {out_schema}")
+    logger.info("Write result into Delta table")
+    topk.write.mode("overwrite").format("delta").saveAsTable(f"{catalog}.{out_schema}.{out_table}")
+    logger.info(f"Result into Delta table{out_table}")
+
+    # Optional optimize
+    try:
+        spark.sql(f"OPTIMIZE {catalog}.{out_schema}.{out_table} ZORDER BY (src_document_id)")
+    except Exception as e:
+        print(f"OPTIMIZE skipped: {e}")
+
+    cnt = spark.table(f"{catalog}.{out_schema}.{out_table}").count()
+    print(f"Global document similarity pairs written: {cnt:,}")
+    return {
+        "similarity_table": f"{catalog}.{out_schema}.{out_table}",
+        "pairs": cnt,
+        "num_neighbors": num_neighbors,
+        "vocab_size": vocab_size,
+        "min_df": min_df,
+        "bucket_length": bucket_length,
+               "num_hash_tables": num_hash_tables,
+        "cosine_threshold": cosine_threshold
+    }
+
+    
+# 1) Build the concat view
+spark = SparkSession.builder \
+    .appName("Clustering SQL") \
+    .getOrCreate()
+Todyay_Date = datetime.now()
+local_directory=os.getcwd()
+logs_path=os.path.join(local_directory,f"{local_directory}/logs")
+Path(logs_path).mkdir(parents=True, exist_ok=True)
+logs_path=os.path.join(logs_path, f"clustering_script_{Todyay_Date}.log")
+
+logger = logging.getLogger("clustering_notebook_logger ")
+logger.setLevel(logging.INFO)
+
+if logger.handlers:
+    for h in list(logger.handlers):
+        logger.removeHandler(h)
+
+fh = logging.FileHandler(logs_path, mode="a", encoding="utf-8")
+
+fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+fh.setFormatter(fmt)
+logger.addHandler(fh)
+
+logger.info("Clustering Notebook started.")
+
+_ = main_concat(schema="silver_sap_bo", table="webi_metadata_cms_silver", output_view="v_docid_concat", logger=logger)
+
+# 2) Compute global similarity across Document_Id
+res = main_global_doc_similarity(
+    catalog="dataplatform01_central_dev_catalog_01",
+    schema="silver_sap_bo",
+    concat_view="v_docid_concat",
+    out_schema="silver_sap_bo",
+    out_table="webi_metadata_cms_doc_global_similarity_V25",
+    num_neighbors=25,
+    vocab_size=30000,
+    min_df=3,
+    bucket_length=2.0,
+    num_hash_tables=6,
+    cosine_threshold=0.7,  # keep strong matches    cosine_threshold=0.85  # keep strong matches only (optional)
+    logger=logger
+)
