@@ -1,0 +1,16 @@
+{
+    "SAP_BO_Credentials":{
+        "bo_url":"https://bobidev.atradiusnet.com:8443/biprws/",
+        "username" : "ESBWIL1",
+        "password" : "ATMarkWise5@3",
+        "auth_type" : "secLDAP"
+    },
+    "Databrick_config":{
+        	"target_storage_account": "dataplatform01ctrl01d",
+            "target_container_name" : "landing-zone"
+    },
+    "Static_Dict":{
+        "Report_ID_List" : "reports.txt"
+    }
+
+}
