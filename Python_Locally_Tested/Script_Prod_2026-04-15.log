@@ -1,0 +1,5 @@
+2026-04-15 10:08:14,704 - INFO - Script started.
+2026-04-15 10:08:43,721 - INFO - Script started.
+2026-04-15 10:08:43,722 - INFO - API URL Used for Logon: https://bobidev.atradiusnet.com:8443/biprws//logon/long
+NFO - Closing down clientserver connection
+2026-04-15 10:08:43,987 - ERROR - Failed to logon SAP BO Server: https://bobidev.atradiusnet.com:8443/biprws//logon/long with error: HTTPSConnectionPool(host='bobidev.atradiusnet.com', port=8443): Max retries exceeded with url: /biprws//logon/long (Caused by NameResolutionError("<urllib3.connection.HTTPSConnection object at 0x7fa3f81ca6f0>: Failed to resolve 'bobidev.atradiusnet.com' ([Errno -2] Name or service not known)")), exiting script.
