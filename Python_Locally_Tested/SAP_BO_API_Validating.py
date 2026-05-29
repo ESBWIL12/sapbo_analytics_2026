@@ -556,10 +556,10 @@ def API_Json_CAll(API_url: str, headers: dict, API_CALLS: dict, FolderPath: str,
     API_response_TimeFrame=5
     API_Retry_Attempt=3
     API_Call_Sleep_Time=5
+    API_responded: dict = {}
     while API_Retry_Attempt >0:
         Before_API_Call=datetime.now()
         logging.info(f"API URL Used for WEBI Document: {API_url}")
-        API_responded: dict = {}
         try:
             API_url_CALL = requests.get(API_url, headers=headers, timeout=(3,100), verify=False)
         except requests.exceptions.RequestException as e:
@@ -567,10 +567,9 @@ def API_Json_CAll(API_url: str, headers: dict, API_CALLS: dict, FolderPath: str,
             API_Retry_Attempt -= 1
             API_CALLS["Total Calls"] += 1
             API_CALLS["Document Calls"] += 1
-            if API_Retry_Attempt ==0:
-                API_responded = API_url_CALL.json()
+            if API_Retry_Attempt == 0:
+                logging.error(f"All retries exhausted for API URL: {API_url}")
             continue
-            # time.sleep(API_Call_Sleep_Time)
         API_CALLS["Total Calls"] += 1
         API_CALLS["Document Calls"] += 1
         After_API_Call=datetime.now()
@@ -591,13 +590,17 @@ def API_Json_CAll(API_url: str, headers: dict, API_CALLS: dict, FolderPath: str,
             except Exception as e:
                 logging.error(f"Error extracting Json: {e}")
         elif API_url_CALL.status_code == 404:
-            API_responded = API_url_CALL.json()
+            try:
+                API_responded = API_url_CALL.json()
+            except (ValueError, Exception):
+                API_responded = {"error_code": API_url_CALL.status_code}
             logging.error(f"Error {API_url_CALL.status_code} FOR API Call. Retrying...{API_Retry_Attempt} attempts left.")
             API_Retry_Attempt -= 1
-            # time.sleep(API_Call_Sleep_Time)  # Wait before retrying
-            # API_CALLS["Pauses"] += 1
         else:
-            API_responded = API_url_CALL.json()
+            try:
+                API_responded = API_url_CALL.json()
+            except (ValueError, Exception):
+                API_responded = {"error_code": API_url_CALL.status_code}
             logging.error(f"Error {API_url_CALL.status_code} FOR API Call. with response: {API_responded} ")
             API_Retry_Attempt=0
 
