@@ -3,6 +3,29 @@
 # [tool.databricks.environment]
 # environment_version = "5"
 # ///
+# DBTITLE 1,Skip first 3 working days of month
+from datetime import date, timedelta
+
+today = date.today()
+first_of_month = today.replace(day=1)
+
+# Count working days (Mon-Fri) from the 1st up to and including today
+working_day_count = 0
+current = first_of_month
+while current <= today:
+    if current.weekday() < 5:  # Mon=0 ... Fri=4
+        working_day_count += 1
+    current += timedelta(days=1)
+
+if working_day_count <= 3:
+    msg = f"Today ({today}) is working day {working_day_count} of the month — skipping extraction."
+    print(f"\u2717 {msg}")
+    raise Exception(msg)
+else:
+    print(f"\u2713 Today ({today}) is working day {working_day_count} of the month — proceeding.")
+
+# COMMAND ----------
+
 # DBTITLE 1,Check if previous run succeeded
 import requests
 import json
