@@ -1,0 +1,95 @@
+2026-04-30 13:26:17,242 - INFO - Script started: 2026-04-30 with directory /Workspace/Users/baodi.wilkinson.external@atradius.com/SAP_BO_Analytics/notebooks_bronze_ingest
+2026-04-30 13:26:17,485 - INFO - Error while sending or receiving.
+Traceback (most recent call last):
+  File "/databricks/spark/python/lib/py4j-0.10.9.7-src.zip/py4j/clientserver.py", line 528, in send_command
+    self.socket.sendall(command.encode("utf-8"))
+ConnectionResetError: [Errno 104] Connection reset by peer
+2026-04-30 13:26:17,486 - INFO - Closing down clientserver connection
+2026-04-30 13:26:17,487 - INFO - Exception while sending command.
+Traceback (most recent call last):
+  File "/databricks/spark/python/lib/py4j-0.10.9.7-src.zip/py4j/clientserver.py", line 528, in send_command
+    self.socket.sendall(command.encode("utf-8"))
+ConnectionResetError: [Errno 104] Connection reset by peer
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/databricks/spark/python/lib/py4j-0.10.9.7-src.zip/py4j/java_gateway.py", line 1038, in send_command
+    response = connection.send_command(command)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/databricks/spark/python/lib/py4j-0.10.9.7-src.zip/py4j/clientserver.py", line 531, in send_command
+    raise Py4JNetworkError(
+py4j.protocol.Py4JNetworkError: Error while sending
+2026-04-30 13:26:17,524 - INFO - Closing down clientserver connection
+2026-04-30 13:26:17,565 - INFO - Received command c on object id p0
+2026-04-30 13:26:17,856 - INFO - Error while sending or receiving.
+Traceback (most recent call last):
+  File "/databricks/spark/python/lib/py4j-0.10.9.7-src.zip/py4j/clientserver.py", line 528, in send_command
+    self.socket.sendall(command.encode("utf-8"))
+ConnectionResetError: [Errno 104] Connection reset by peer
+2026-04-30 13:26:17,857 - INFO - Closing down clientserver connection
+2026-04-30 13:26:17,857 - INFO - Exception while sending command.
+Traceback (most recent call last):
+  File "/databricks/spark/python/lib/py4j-0.10.9.7-src.zip/py4j/clientserver.py", line 528, in send_command
+    self.socket.sendall(command.encode("utf-8"))
+ConnectionResetError: [Errno 104] Connection reset by peer
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/databricks/spark/python/lib/py4j-0.10.9.7-src.zip/py4j/java_gateway.py", line 1038, in send_command
+    response = connection.send_command(command)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/databricks/spark/python/lib/py4j-0.10.9.7-src.zip/py4j/clientserver.py", line 531, in send_command
+    raise Py4JNetworkError(
+py4j.protocol.Py4JNetworkError: Error while sending
+2026-04-30 13:26:17,866 - INFO - Closing down clientserver connection
+2026-04-30 13:26:18,566 - INFO - Received command c on object id p0
+2026-04-30 13:26:18,715 - INFO - Replacing spaces in column names
+2026-04-30 13:26:19,564 - INFO - Received command c on object id p0
+2026-04-30 13:26:20,566 - INFO - Received command c on object id p0
+2026-04-30 13:26:21,564 - INFO - Received command c on object id p0
+2026-04-30 13:26:22,564 - INFO - Received command c on object id p0
+2026-04-30 13:26:23,564 - INFO - Received command c on object id p0
+2026-04-30 13:26:24,564 - INFO - Received command c on object id p0
+2026-04-30 13:26:25,564 - INFO - Received command c on object id p0
+2026-04-30 13:26:26,564 - INFO - Received command c on object id p0
+2026-04-30 13:26:27,564 - INFO - Received command c on object id p0
+2026-04-30 13:26:28,564 - INFO - Received command c on object id p0
+2026-04-30 13:26:29,564 - INFO - Received command c on object id p0
+2026-04-30 13:26:30,564 - INFO - Received command c on object id p0
+2026-04-30 13:26:31,564 - INFO - Received command c on object id p0
+2026-04-30 13:26:32,564 - INFO - Received command c on object id p0
+2026-04-30 13:26:33,564 - INFO - Received command c on object id p0
+2026-04-30 13:26:34,564 - INFO - Received command c on object id p0
+2026-04-30 13:26:35,564 - INFO - Received command c on object id p0
+2026-04-30 13:26:36,564 - INFO - Received command c on object id p0
+2026-04-30 13:26:37,564 - INFO - Received command c on object id p0
+2026-04-30 13:26:38,564 - INFO - Received command c on object id p0
+2026-04-30 13:26:39,564 - INFO - Received command c on object id p0
+2026-04-30 13:26:40,564 - INFO - Received command c on object id p0
+2026-04-30 13:26:41,564 - INFO - Received command c on object id p0
+2026-04-30 13:26:42,564 - INFO - Received command c on object id p0
+2026-04-30 13:26:43,564 - INFO - Received command c on object id p0
+2026-04-30 13:26:44,564 - INFO - Received command c on object id p0
+2026-04-30 13:26:45,564 - INFO - Received command c on object id p0
+2026-04-30 13:26:46,564 - INFO - Received command c on object id p0
+2026-04-30 13:26:47,747 - INFO - Received command c on object id p0
+2026-04-30 13:26:48,566 - INFO - Received command c on object id p0
+2026-04-30 13:26:49,564 - INFO - Received command c on object id p0
+2026-04-30 13:26:50,564 - INFO - Received command c on object id p0
+2026-04-30 13:26:51,564 - INFO - Received command c on object id p0
+2026-04-30 13:26:52,564 - INFO - Received command c on object id p0
+2026-04-30 13:26:53,564 - INFO - Received command c on object id p0
+2026-04-30 13:26:54,564 - INFO - Received command c on object id p0
+2026-04-30 13:26:55,564 - INFO - Received command c on object id p0
+2026-04-30 13:26:56,564 - INFO - Received command c on object id p0
+2026-04-30 13:26:57,564 - INFO - Received command c on object id p0
+2026-04-30 13:26:58,564 - INFO - Received command c on object id p0
+2026-04-30 13:26:59,564 - INFO - Received command c on object id p0
+2026-04-30 13:27:00,564 - INFO - Received command c on object id p0
+2026-04-30 13:27:01,564 - INFO - Received command c on object id p0
+2026-04-30 13:27:02,564 - INFO - Received command c on object id p0
+2026-04-30 13:27:03,564 - INFO - Received command c on object id p0
+2026-04-30 13:27:04,089 - INFO - Closing down clientserver connection
+2026-04-30 13:27:04,092 - INFO - Closing down clientserver connection
